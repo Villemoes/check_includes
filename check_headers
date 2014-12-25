@@ -1,0 +1,480 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Slurp;
+use File::Basename;
+use Cwd qw(realpath);
+
+my @system_include_dirs;
+my @angle_include_dirs;
+my @quote_include_dirs;
+my @cmdline_includes;
+my @cmdline_defines;
+my $linux;
+my $nostdinc;
+my $trigraphs;
+my $cident_path;
+my @cident_opts;
+my $help;
+
+# Some header files should be ignored for one reason or other; we add
+# them here.
+my %linux_blacklist = map {$_ => 1}
+    qw(
+	  asm-generic/audit_change_attr.h
+	  asm-generic/audit_dir_write.h
+	  asm-generic/audit_read.h
+	  asm-generic/audit_signal.h
+	  asm-generic/audit_write.h
+	  crc32table.h
+     );
+
+my @ident_classes = get_ident_classes();
+
+# We need to know which directories to search for header files, so we
+# need to accept and parse -I and friends. But we also need to pass
+# this information on to cident (or rather, the sparse library), since
+# sparse will also need to know the include paths, in order to do
+# proper preprocessing (we want DECLARE_BITMAP(name, 123) to be
+# expanded so that we see the declaration of name).
+#
+# Unfortunately, the traditional cc options are rather heterogenous
+# and non-standard, so using Getopt::Long is not completely
+# straight-forward. It seems simplest to just implement our own option
+# parser. Sigh...
+
+
+@ARGV = parse_options(@ARGV);
+
+sub parse_options {
+    my @ret;
+
+    # This eliminates some code duplication
+    my %include_arrays = ( I => \@angle_include_dirs,
+			   iquote => \@quote_include_dirs,
+			   isystem => \@system_include_dirs );
+
+    while (@_) {
+	my $arg = shift;
+
+	if ($arg =~ /^--linux(?:=(.+))?/) {
+	    # --linux[=arch] is a shorthand for a bunch of other
+	    # options. Also, it turns on a few heuristics which
+	    # hopefully reduce the number of false positives.
+	    my $arch = $1 // 'x86';
+	    my $sysdir = qx(cc -print-file-name=include);
+	    if (defined $sysdir) {
+		chomp($sysdir);
+		unshift @_, "-isystem", $sysdir;
+	    }
+	    unshift @_,
+		("-nostdinc",
+		 "-Iarch/${arch}/include",
+		 "-Iarch/${arch}/include/generated",
+		 "-Iinclude",
+		 "-Iarch/${arch}/include/uapi",
+		 "-Iarch/${arch}/include/generated/uapi",
+		 "-Iinclude/uapi",
+		 "-Iinclude/generated/uapi",
+		 "-include", "./include/linux/kconfig.h",
+		 "-D__KERNEL__",
+		);
+	    $linux = 1;
+	    next;
+	}
+
+	if ($arg =~ /^-(I|iquote|isystem)(.*)/) {
+	    my $dir = $2;
+	    if ($dir eq '') {
+		$dir = shift or die "missing argument to $1";
+	    }
+	    push @{$include_arrays{$1}}, $dir;
+	    next;
+	}
+
+	if ($arg =~ /^-include(.*)/) {
+	    my $file = $1;
+	    if ($file eq '') {
+		$file = shift or die "missing argument to -include"
+	    }
+	    push @cmdline_includes, $file;
+	    next;
+	}
+
+	if ($arg =~ /^-D(.*)/) {
+	    my $def = $1;
+	    if ($def eq '') {
+		$def = shift or die "missing argument to -D";
+	    }
+	    push @cmdline_defines, $def;
+	    next;
+	}
+
+
+	if ($arg =~ /^-nostdinc/) {
+	    $nostdinc = 1;
+	    next;
+	}
+	if ($arg =~ /^-trigraphs/) {
+	    $trigraphs = 1;
+	    next;
+	}
+
+	if ($arg =~ /^--cident-path(?:=(.+))?/) {
+	    my $path = $1;
+	    if (not defined $path) {
+		$path = shift or die "missing argument to --cident-path";
+	    }
+	    $cident_path = $path;
+	    next;
+	}
+
+	if ($arg =~ /^-/) {
+	    die "unknown option $arg";
+	}
+
+	push @ret, $arg;
+    }
+
+    return @ret;
+}
+
+
+# FIXME: Find the actual search path, maybe by parsing the output of "cpp -Wp,-v < /dev/null"
+if (not $nostdinc) {
+    push @angle_include_dirs, qw(/usr/local/include /usr/include);
+}
+
+
+if (not defined $cident_path) {
+    $cident_path = dirname($0) . '/cident';
+}
+
+push @cident_opts, '-nostdinc' if $nostdinc;
+push @cident_opts, '-trigraphs' if $trigraphs;
+push @cident_opts, map { ('-isystem', $_) } @system_include_dirs;
+push @cident_opts, map { ('-iquote', $_) } @quote_include_dirs;
+push @cident_opts, map { ('-I', $_) } @angle_include_dirs;
+push @cident_opts, map { ('-include', $_) } @cmdline_includes;
+push @cident_opts, map { ("-D$_") } @cmdline_defines;
+
+
+# We don't distinguish system headers from other angle include dirs,
+# so concatenate the lists once we've built the options for cident.
+push @angle_include_dirs, @system_include_dirs;
+
+
+
+
+my $current_file;
+my %angle_parsed_header; # <foo/bar.h> => result of lookup+parse of foo/bar.h
+my %quote_parsed_header; # key = dir of currentfile, value is hashref similar to angle_parsed_header.
+
+
+do_source_file($_) for (@ARGV);
+
+
+
+sub do_source_file {
+    my $filename = shift;
+    $current_file = $filename;
+
+    my $src = do_phase123($filename);
+    return if (not defined $src);
+
+    # Now look for #includes, and for each try to parse the header.
+    while ($src =~ m{^[ \t]*#[ \t]*include[ \t]+([<"])(.*)[>"]}gm) {
+	my $angle_quote = $1;
+	my $hpath = $2;
+	next if ($linux && exists $linux_blacklist{$hpath});
+	# Included .c files are usually auto-generated, and only used from very few files.
+	next unless $hpath =~ m/\.h$/;
+	my $h = ($angle_quote eq '<') ? get_angle_header($hpath) : get_quote_header($hpath);
+	if (exists $h->{skip}) {
+	    printf STDERR "%s: skipping %s: %s\n", $filename, $hpath, $h->{skip};
+	    next;
+	}
+	my $usecount = 0;
+
+	# object-like macros, typedefs, extern vars, enum constants
+	# and extern functions just need to be present as words to be
+	# considered used (the latter because their address may be
+	# taken, and unary & is not even required for that).
+	for my $class (qw(obj_macro typedef extern_var enum_cst extern_func)) {
+	    for my $id (@{$h->{$class}}) {
+		if ($src =~ m/\b$id\b/) {
+		    ++$usecount;
+		}
+	    }
+	}
+
+	# A function-like macro must be followed by an opening
+	# parenthesis. While probably not strictly required for static
+	# inlines, we require the same of those.
+	for my $class (qw(fun_macro inline_func)) {
+	    for my $id (@{$h->{$class}}) {
+		if ($src =~ m/\b$id\s*\(/) {
+		    ++$usecount;
+		}
+	    }
+	}
+
+	# A struct, union or enum tag can only be used by preceding it
+	# by the corresponding keyword. We are only interested in
+	# definitions, not declarations. This doesn't necessarily mean
+	# that the TU actually needs a definition of the struct (it
+	# might only deal with pointers to it and never need to know
+	# its members or size).
+	for my $kw (qw(struct union enum)) {
+	    for my $id (@{$h->{"${kw}_def"}}) {
+		if ($src =~ m/\b$kw\s+$id\b/) {
+		    ++$usecount;
+		}
+	    }
+	}
+
+	if ($usecount == 0) {
+	    printf "%s: apparently unnecessary include of %s\n", $filename, $hpath;
+	}
+    }
+
+}
+
+
+
+sub get_angle_header {
+    my $path = shift;
+
+    return $angle_parsed_header{$path}
+	if exists $angle_parsed_header{$path};
+
+    for my $dir (@angle_include_dirs) {
+	if (-e "${dir}/${path}") {
+	    $angle_parsed_header{$path} = parse_header("${dir}/${path}");
+	    return $angle_parsed_header{$path};
+	}
+    }
+
+    $angle_parsed_header{$path} = { skip => "not found" };
+    return $angle_parsed_header{$path};
+}
+
+sub get_quote_header {
+    my $path = shift;
+    my $curdir = dirname($current_file);
+    $curdir = realpath($curdir);
+    return $quote_parsed_header{$curdir}{$path}
+	if (exists $quote_parsed_header{$curdir}{$path});
+
+    for my $dir ($curdir, @quote_include_dirs, @angle_include_dirs) {
+	if (-e "${dir}/${path}") {
+	    $quote_parsed_header{$curdir}{$path} = parse_header("${dir}/${path}");
+	    return $quote_parsed_header{$curdir}{$path};
+	}
+    }
+
+    $quote_parsed_header{$curdir}{$path} = { skip => "not found" };
+    return $quote_parsed_header{$curdir}{$path};
+}
+
+sub parse_header {
+    my $path = shift;
+    my $path_bn = basename($path);
+    my $src = do_phase123($path);
+
+    if (not defined $src) {
+	return { skip => "reading $path failed: $!" };
+    }
+
+    # If this is a wrapper around one or more other headers, we tell
+    # cident to report global identifiers from all files, not just the
+    # one we're handling. We then include the symbols from the
+    # directly included files.
+    #
+    # We do the same for all (possibly recursively) included files
+    # with the same basename as $path. Unconditionally letting cident
+    # spit out all global identifiers is waaay too slow, though, so we
+    # insist that $path directly includes at least one file with the
+    # same basename for this to trigger.
+
+    my $is_wrapper = is_wrapper($src);
+    my @angle_includes = ($src =~ m/^\s*#\s*include\s+<([^<>]+)>.*$/mg);
+    my $includes_same_basename = any(map {basename($_) eq $path_bn} @angle_includes);
+
+    $ENV{"CIDENT_all_files"} = ($is_wrapper || $includes_same_basename) ? 1 : 0;
+    my @lines = qx($cident_path @cident_opts $path);
+    if ($? == -1) {
+	return { skip => "invoking cident failed" };
+    } elsif ($?) {
+	return { skip => sprintf("cident exited with non-zero status %d", $? >> 8) };
+    }
+
+    my $h = { map { $_ => [] } @ident_classes };
+
+    if ($is_wrapper || $includes_same_basename) {
+	for (@lines) {
+	    chomp;
+	    my ($loc, $class, $ident) = split;
+	    if (not exists $h->{$class}) {
+		printf STDERR "unknown identifier class %s at %s\n", $class, $loc;
+		next;
+	    }
+	    my ($file, $line) = split /:/, $loc;
+	    if ($file eq $path
+		|| basename($file) eq $path_bn
+		|| ($is_wrapper && ends_with_any($file, \@angle_includes))
+		|| ($path_bn eq 'errno.h' && basename($file) eq 'errno-base.h')
+		|| ($path_bn eq 'string.h' && basename($file) =~ m/string_(?:32|64)\.h/)
+	       ) {
+		push @{$h->{$class}}, $ident;
+	    }
+	}
+    } else {
+	for (@lines) {
+	    chomp;
+	    my ($loc, $class, $ident) = split;
+	    if (not exists $h->{$class}) {
+		printf STDERR "unknown identifier class %s at %s\n", $class, $loc;
+		next;
+	    }
+	    push @{$h->{$class}}, $ident;
+	}
+    }
+
+    remove_duplicates($h);
+
+    return $h;
+}
+
+sub is_wrapper {
+    # A "wrapper" means a header file which consists only of
+    # angle-include directives (at least one), and maybe an include
+    # guard.
+    my ($src) = @_;
+    return ($src =~ m/^ # Anchor the match
+			(?:
+			    \s*\#\s*ifndef\s+([_A-Za-z][_A-Za-z0-9]*).*\n
+			    \s*\#\s*define\s+\1\b.*\n
+			|
+			    \s*\#\s*if\s+!\s*defined\s*\(\s*([_A-Za-z][_A-Za-z0-9]*)\s*\).*\n
+			    \s*\#\s*define\s+\2\b.*\n
+			)? # optionally an include guard
+			(?:
+			    \s*\#\s*include\s+<[^<>]+>.*\n
+			)+ # one ore more angle include directives
+			(?:
+			    \s*\#\s*endif\s*
+			)? # Closing include guard
+			$
+		     /x);
+}
+
+
+sub ends_with_any {
+    my ($str, $aref) = @_;
+    for (@$aref) {
+	return 1 if ($str =~ m#(^|/)$_$#);
+    }
+    return 0;
+}
+
+
+sub remove_duplicates {
+    my ($h) = @_;
+    for my $class (@ident_classes) {
+	my %k = map {$_ => 1} @{$h->{$class}};
+	@{$h->{$class}} = sort keys %k;
+    }
+}
+
+# Read file, handle (and yell at) trigraphs, do line continuations, remove comments.
+sub do_phase123 {
+    my $filename = shift;
+    my $source = read_file($filename);
+
+    $source = replace_trigraphs($source)
+	if $trigraphs;
+    $source =~ s/\\\n//g;
+
+    $source = strip_comments($source);
+    return $source;
+}
+
+
+sub replace_trigraphs {
+    my %trigraphs = ( "??=" => '#', "??/" => '\\', "??'" => '^',
+		      "??(" => '[', "??)" => ']', "??!" => '|',
+		      "??<" => '{', "??>" => '}', "??-" => '~' );
+    my $src = shift;
+    my $count = ($src =~ s/(\?\?[=\/'()!<>-])/$trigraphs{$1}/g);
+    printf STDERR "warning: %d trigraphs encountered in %s\n",
+	$count, $current_file
+	    if ($count);
+    return $src;
+}
+
+
+
+
+sub strip_comments {
+    my $src = shift;
+
+    # http://stackoverflow.com/a/911583/722859
+    $src =~ s{
+		 /\*         ##  Start of /* ... */ comment
+		 [^*]*\*+    ##  Non-* followed by 1-or-more *'s
+		 (?:
+		     [^/*][^*]*\*+
+		 )*          ##  0-or-more things which don't start with /
+		 ##    but do end with '*'
+		 /           ##  End of /* ... */ comment
+
+	     |
+		 //     ## Start of // comment
+		 [^\n]* ## Anything which is not a newline
+		 \n     ## End of // comment
+
+	     |         ##     OR  various things which aren't comments:
+
+		 (
+		     "           ##  Start of " ... " string
+		     (?:
+			 \\.           ##  Escaped char
+		     |               ##    OR
+			 [^"\\]        ##  Non "\
+		     )*
+		     "           ##  End of " ... " string
+
+		 |         ##     OR
+
+		     '           ##  Start of ' ... ' string
+		     (
+			 \\.           ##  Escaped char
+		     |               ##    OR
+			 [^'\\]        ##  Non '\
+		     )*
+		     '           ##  End of ' ... ' string
+
+		 |         ##     OR
+
+		     .           ##  Anything other char
+		     [^/"'\\]*   ##  Chars which doesn't start a comment, string or escape
+		 )
+	 }{defined $1 ? $1 : " "}gxse;
+
+    return $src;
+}
+
+sub get_ident_classes {
+    my $dir = dirname($0);
+    my @classes = ();
+    my @lines = read_file("${dir}/ident_classes.h");
+    for (@lines) {
+	push @classes, $1 if m/^\s*ID_CLASS\(\s*[A-Z_]+\s*,\s*([a-zA-Z_]+)\s*\)/;
+    }
+    return @classes;
+}
+
+sub any { $_ && return 1 for @_; 0 }
