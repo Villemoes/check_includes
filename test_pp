@@ -1,0 +1,65 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Pplight;
+
+my @test_cases =
+    (
+     { in => <<'EOF'
+const char *C = "/* this is not a C comment */"; /* but this is */
+const char *Cplusplus = "In perl, // means \"defined-or\""; // ...
+EOF
+       ,
+       expect => <<'EOF'
+const char *C = "/* this is not a C comment */";
+const char *Cplusplus = "In perl, // means \"defined-or\"";
+EOF
+     },
+     { in => <<'EOF'
+int x; /* comment /* do not nest */
+int y; // so y is declared */
+int z; /* Also, we cannot comment out end-of-comment // */
+int w; /* so w is also declared */
+EOF
+       ,
+       expect => <<'EOF'
+int x;
+int y;
+int z;
+int w;
+EOF
+     },
+     { in => <<'EOF'
+void bar(void) {
+printf("Foo went into a %s.\n", __func__);
+/* ... */
+printf("\"Just put it on my \\
+t\", said Foo.");
+}
+EOF
+       ,
+       expect => <<'EOF'
+void bar(void) {
+printf("Foo went into a %s.\n", __func__);
+
+printf("\"Just put it on my \t\", said Foo.");
+}
+EOF
+     }
+
+    );
+
+for (my $i = 0; $i < @test_cases; ++$i) {
+    my $t = $test_cases[$i];
+    my $out = pp_light($t->{in}, $t->{opt});
+    if ($out ne $t->{expect}) {
+	printf "Test case %d failed:\n", $i;
+	printf "==== Expected ====\n";
+	print  $t->{expect};
+	printf "==== Got ====\n";
+	print  $out;
+	printf "==== ====\n";
+    }
+}
