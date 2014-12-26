@@ -145,11 +145,12 @@ sub parse_options {
 }
 
 
-# FIXME: Find the actual search path, maybe by parsing the output of "cpp -Wp,-v < /dev/null"
 if (not $nostdinc) {
-    push @angle_include_dirs, qw(/usr/local/include /usr/include);
+    push @system_include_dirs, get_default_search_path();
 }
-
+if (not $linux) {
+    push @cmdline_defines, '__STDC_HOSTED__';
+}
 
 if (not defined $cident_path) {
     $cident_path = dirname($0) . '/cident';
@@ -406,6 +407,20 @@ sub get_ident_classes {
 	push @classes, $1 if m/^\s*ID_CLASS\(\s*[A-Z_]+\s*,\s*([a-zA-Z_]+)\s*\)/;
     }
     return @classes;
+}
+
+sub get_default_search_path {
+    my @lines = qx{cpp -Wp,-v < /dev/null 2>&1 > /dev/null};
+    my $found = 0;
+    my @ret = ();
+    for (@lines) {
+	chomp;
+	$found = 1 if (not $found && $_ eq '#include <...> search starts here:');
+	push @ret, $1 if ($found && m#^ (/.*)$#);
+	$found = 0 if ($found && $_ eq 'End of search list.');
+    }
+    push @ret, qw(/usr/local/include /usr/include) if (@ret == 0);
+    return @ret;
 }
 
 sub any { $_ && return 1 for @_; 0 }
