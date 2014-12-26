@@ -183,6 +183,8 @@ sub do_source_file {
 
     my $src = do_phase123($filename);
     return if (not defined $src);
+    my $src2 = $src;
+    $src2 =~ s{^[ \t]*#[ \t]*include[ \t]+([<"])(.*)[>"].*\n}{}gm;
 
     # Now look for #includes, and for each try to parse the header.
     while ($src =~ m{^[ \t]*#[ \t]*include[ \t]+([<"])(.*)[>"]}gm) {
@@ -204,7 +206,7 @@ sub do_source_file {
 	# taken, and unary & is not even required for that).
 	for my $class (qw(obj_macro typedef extern_var enum_cst extern_func)) {
 	    for my $id (@{$h->{$class}}) {
-		if ($src =~ m/\b$id\b/) {
+		if ($src2 =~ m/\b$id\b/) {
 		    ++$usecount;
 		}
 	    }
@@ -215,7 +217,7 @@ sub do_source_file {
 	# inlines, we require the same of those.
 	for my $class (qw(fun_macro inline_func)) {
 	    for my $id (@{$h->{$class}}) {
-		if ($src =~ m/\b$id\s*\(/) {
+		if ($src2 =~ m/\b$id\s*\(/) {
 		    ++$usecount;
 		}
 	    }
@@ -229,7 +231,7 @@ sub do_source_file {
 	# its members or size).
 	for my $kw (qw(struct union enum)) {
 	    for my $id (@{$h->{"${kw}_def"}}) {
-		if ($src =~ m/\b$kw\s+$id\b/) {
+		if ($src2 =~ m/\b$kw\s+$id\b/) {
 		    ++$usecount;
 		}
 	    }
