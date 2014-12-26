@@ -6,6 +6,9 @@ use warnings;
 use File::Slurp;
 use File::Basename;
 use Cwd qw(realpath);
+use lib dirname($0);
+
+use Pplight;
 
 my @system_include_dirs;
 my @angle_include_dirs;
@@ -181,8 +184,11 @@ sub do_source_file {
     my $filename = shift;
     $current_file = $filename;
 
-    my $src = do_phase123($filename);
-    return if (not defined $src);
+    my $src = pp_light_file($filename);
+    if (not defined $src) {
+	printf STDERR "reading %s failed: $!\n", $filename;
+	return;
+    }
     my $src2 = $src;
     $src2 =~ s{^[ \t]*#[ \t]*include[ \t]+([<"])(.*)[>"].*\n}{}gm;
 
@@ -284,7 +290,7 @@ sub get_quote_header {
 sub parse_header {
     my $path = shift;
     my $path_bn = basename($path);
-    my $src = do_phase123($path);
+    my $src = pp_light_file($path);
 
     if (not defined $src) {
 	return { skip => "reading $path failed: $!" };
@@ -391,83 +397,6 @@ sub remove_duplicates {
     }
 }
 
-# Read file, handle (and yell at) trigraphs, do line continuations, remove comments.
-sub do_phase123 {
-    my $filename = shift;
-    my $source = read_file($filename);
-
-    $source = replace_trigraphs($source)
-	if $trigraphs;
-    $source =~ s/\\\n//g;
-
-    $source = strip_comments($source);
-    return $source;
-}
-
-
-sub replace_trigraphs {
-    my %trigraphs = ( "??=" => '#', "??/" => '\\', "??'" => '^',
-		      "??(" => '[', "??)" => ']', "??!" => '|',
-		      "??<" => '{', "??>" => '}', "??-" => '~' );
-    my $src = shift;
-    my $count = ($src =~ s/(\?\?[=\/'()!<>-])/$trigraphs{$1}/g);
-    printf STDERR "warning: %d trigraphs encountered in %s\n",
-	$count, $current_file
-	    if ($count);
-    return $src;
-}
-
-
-
-
-sub strip_comments {
-    my $src = shift;
-
-    # http://stackoverflow.com/a/911583/722859
-    $src =~ s{
-		 /\*         ##  Start of /* ... */ comment
-		 [^*]*\*+    ##  Non-* followed by 1-or-more *'s
-		 (?:
-		     [^/*][^*]*\*+
-		 )*          ##  0-or-more things which don't start with /
-		 ##    but do end with '*'
-		 /           ##  End of /* ... */ comment
-
-	     |
-		 //     ## Start of // comment
-		 [^\n]* ## Anything which is not a newline
-		 \n     ## End of // comment
-
-	     |         ##     OR  various things which aren't comments:
-
-		 (
-		     "           ##  Start of " ... " string
-		     (?:
-			 \\.           ##  Escaped char
-		     |               ##    OR
-			 [^"\\]        ##  Non "\
-		     )*
-		     "           ##  End of " ... " string
-
-		 |         ##     OR
-
-		     '           ##  Start of ' ... ' string
-		     (
-			 \\.           ##  Escaped char
-		     |               ##    OR
-			 [^'\\]        ##  Non '\
-		     )*
-		     '           ##  End of ' ... ' string
-
-		 |         ##     OR
-
-		     .           ##  Anything other char
-		     [^/"'\\]*   ##  Chars which doesn't start a comment, string or escape
-		 )
-	 }{defined $1 ? $1 : " "}gxse;
-
-    return $src;
-}
 
 sub get_ident_classes {
     my $dir = dirname($0);
