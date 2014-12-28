@@ -14,7 +14,7 @@ my %default_opt =
     ( trigraphs => 0,
       bsnl => 1,
       strip_comments => 1,
-      if0 => 0,
+      if0 => 1,
       strip_trailing => 1,
     );
 
@@ -41,6 +41,9 @@ sub pp_light {
 
     $source = strip_comments($source)
 	if $opt{strip_comments};
+
+    $source = remove_if0($source)
+	if $opt{if0};
 
     $source =~ s/[ \t]*(?=\n)//g
 	if $opt{strip_trailing};
@@ -110,6 +113,71 @@ sub strip_comments {
     return $src;
 }
 
+
+# elifs are simple: delete everything from the elif up to but not
+# including the terminating elif, else or endif.
+#
+# ... #elif 0, xxx, #elif yyy, zzz ==> ... #elif yyy, zzz
+# ... #elif 0, xxx, #endif         ==> ... #endif
+# ... #elif 0, xxx, #else, yyy     ==> ... #else, yyy
+#
+# ifs are a little more complicated
+#
+# #if 0, xxx, #else, yyy  ==> #if 1, yyy
+# #if 0, xxx, #elif yyy, zzz ==> #if yyy, zzz
+# #if 0, xxx, #endif ==> (nothing)
+
+sub remove_if0 {
+    my $src = shift;
+    return '' if ($src eq '');
+
+    my @lines = split /\n/, $src;
+
+    for (my $i = 0; $i < @lines; ++$i) {
+	next unless ($lines[$i] =~ m/^\s*#\s*(el)?if\s+0\s*$/);
+	my $elif = defined $1;
+	my $nest = 0;
+	my ($j, $end, $trail);
+
+	for ($j = $i + 1; $j < @lines; ++$j) {
+	    next unless $lines[$j] =~ m/^\s*#/;
+	    if ($lines[$j] =~ m/^\s*#\s*if(?:n?def)?\s+/) {
+		$nest++;
+		next;
+	    }
+	    if ($nest > 0 && $lines[$j] =~ m/^\s*#\s*endif\b/) {
+		$nest--;
+		next;
+	    }
+	    next unless $nest == 0;
+	    if ($lines[$j] =~ m/^\s*#\s*(else|elif|endif)\b(.*)$/) {
+		$end = $1;
+		$trail = $2;
+		last;
+	    }
+	}
+	if ($j >= @lines) {
+	    printf STDERR "warning: unmatched #%s at line %d\n", $elif ? "elif" : "if", $i+1;
+	    last;
+	}
+	if ($elif) {
+	    splice @lines, $i, ($j-$i);
+	} else {
+	    if ($end eq 'else') {
+		splice @lines, $i, (1+$j-$i), "#if 1";
+	    } elsif ($end eq 'elif') {
+		splice @lines, $i, (1+$j-$i), "#if$trail";
+	    } else {
+		splice @lines, $i, (1+$j-$i), "";
+	    }
+	}
+	# We may have introduced a new #if 0, so check the same $i on the next iteration.
+	--$i;
+    }
+
+    $src = join("\n", @lines) . "\n";
+    return $src;
+}
 
 
 1;

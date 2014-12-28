@@ -7,6 +7,7 @@ use Pplight;
 
 my @test_cases =
     (
+     { in => '', expect => '' },
      { in => <<'EOF'
 const char *C = "/* this is not a C comment */"; /* but this is */
 const char *Cplusplus = "In perl, // means \"defined-or\""; // ...
@@ -50,6 +51,60 @@ EOF
      },
      { in => "int missing_newline;",
        expect => "int missing_newline;\n" },
+     { in => <<'EOF'
+#if 0
+this
+#ifdef foo
+foo_stuff
+#endif
+#elif x
+that
+#endif
+EOF
+       ,
+       expect => <<'EOF'
+#if x
+that
+#endif
+EOF
+     },
+     { in => <<'EOF'
+#if /* not this */0
+#elif /* nor this */0
+#else // always this
+#endif
+EOF
+       ,
+       expect => <<'EOF'
+#if 1
+#endif
+EOF
+     },
+     { in => <<'EOF'
+int x;
+#if 0
+#endif
+int y;
+EOF
+       ,
+       expect => "int x;\n\nint y;\n"
+     },
+     { in => "#if 0\n#endif\n", expect => "\n" },
+     { in => <<'EOF'
+#if FOO
+#elif 0
+#elif 0
+#elif BAR
+#elif 0
+#endif
+EOF
+       ,
+       expect => <<'EOF'
+#if FOO
+#elif BAR
+#endif
+EOF
+     },
 
     );
 
