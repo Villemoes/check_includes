@@ -47,7 +47,9 @@ printf("Foo went into a %s.\n", __func__);
 printf("\"Just put it on my \t\", said Foo.");
 }
 EOF
-     }
+     },
+     { in => "int missing_newline;",
+       expect => "int missing_newline;\n" },
 
     );
 

@@ -29,11 +29,15 @@ sub pp_light {
     my $source = shift;
     my %opt = (%default_opt, %{shift // {}});
 
+    $source .= "\n" if ($source ne '' && substr($source, -1) ne "\n");
+
     $source = replace_trigraphs($source)
 	if $opt{trigraphs};
 
     $source =~ s/\\\n//g
 	if $opt{bsnl};
+
+    $source .= "\n" if ($source ne '' && substr($source, -1) ne "\n");
 
     $source = strip_comments($source)
 	if $opt{strip_comments};
