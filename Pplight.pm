@@ -6,9 +6,11 @@ use Exporter;
 
 use File::Slurp;
 
-our $VERSION     = 0.1;
-our @ISA         = qw(Exporter);
-our @EXPORT      = qw(pp_light pp_light_file);
+use overload
+    '""' => sub { $_[0]->{src}; },
+    '@{}' => sub { [split /^/, $_[0]->{src}]; };
+
+our $VERSION     = 0.2;
 
 my %default_opt =
     ( trigraphs => 0,
@@ -18,57 +20,85 @@ my %default_opt =
       strip_trailing => 1,
     );
 
-sub pp_light_file {
-    my $filename = shift;
-    my $source = read_file($filename, {err_mode => 'quiet'});
-    return undef unless defined $source;
-    return pp_light($source);
+sub new {
+    my $class = shift;
+    my $src = shift;
+    my $opt = shift;
+
+    if ($src ne '' && $src !~ m/\n/) {
+	return file($class, $src, $opt);
+    } else {
+	return string($class, $src, $opt);
+    }
 }
 
-sub pp_light {
-    my $source = shift;
+sub file {
+    my $class = shift;
+    my $fn = shift;
+    my $opt = shift;
+    my $src = read_file($fn, {err_mode => 'quiet'});
+    return undef unless defined $src;
+    my $pp = { file => $fn, orig_src => $src };
+    return do_pp_light($class, $pp, $opt);
+}
+
+sub string {
+    my $class = shift;
+    my $str = shift;
+    my $opt = shift;
+    my $pp = { file => "<string>", orig_src => $str };
+    return do_pp_light($class, $pp, $opt);
+}
+
+sub do_pp_light {
+    my $class = shift;
+    my $self = shift;
     my %opt = (%default_opt, %{shift // {}});
 
-    $source .= "\n" if ($source ne '' && substr($source, -1) ne "\n");
+    bless $self, $class;
+    $self->{src} = $self->{orig_src};
+    $self->{src} .= "\n" if ($self->{src} ne '' && substr($self->{src}, -1) ne "\n");
 
-    $source = replace_trigraphs($source)
+    $self->replace_trigraphs()
 	if $opt{trigraphs};
 
-    $source =~ s/\\\n//g
+    $self->bsnl()
 	if $opt{bsnl};
 
-    $source .= "\n" if ($source ne '' && substr($source, -1) ne "\n");
+    $self->{src} .= "\n" if ($self->{src} ne '' && substr($self->{src}, -1) ne "\n");
 
-    $source = strip_comments($source)
+    $self->strip_comments()
 	if $opt{strip_comments};
 
-    $source = remove_if0($source)
+    $self->remove_if0()
 	if $opt{if0};
 
-    $source =~ s/[ \t]*(?=\n)//g
+    $self->strip_trailing()
 	if $opt{strip_trailing};
 
-    return $source;
+    return $self;
 }
 
-
 sub replace_trigraphs {
+    my $self = shift;
     my %trigraphs = ( "??=" => '#', "??/" => '\\', "??'" => '^',
 		      "??(" => '[', "??)" => ']', "??!" => '|',
 		      "??<" => '{', "??>" => '}', "??-" => '~' );
-    my $src = shift;
-    $src =~ s/(\?\?[=\/'()!<>-])/$trigraphs{$1}/g;
-    return $src;
+    $self->{src} =~ s/(\?\?[=\/'()!<>-])/$trigraphs{$1}/g;
+    return $self;
 }
 
-
-
+sub bsnl {
+    my $self = shift;
+    $self->{src} =~ s/\\\n//g;
+    return $self;
+}
 
 sub strip_comments {
-    my $src = shift;
+    my $self = shift;
 
     # http://stackoverflow.com/a/911583/722859
-    $src =~ s{
+    $self->{src} =~ s{
 		 /\*         ##  Start of /* ... */ comment
 		 [^*]*\*+    ##  Non-* followed by 1-or-more *'s
 		 (?:
@@ -110,7 +140,7 @@ sub strip_comments {
 		 )
 	 }{defined $1 ? $1 : " "}gxse;
 
-    return $src;
+    return $self;
 }
 
 
@@ -128,10 +158,10 @@ sub strip_comments {
 # #if 0, xxx, #endif ==> (nothing)
 
 sub remove_if0 {
-    my $src = shift;
-    return '' if ($src eq '');
+    my $self = shift;
+    return $self if ($self->{src} eq '');
 
-    my @lines = split /\n/, $src;
+    my @lines = split /\n/, $self->{src};
 
     for (my $i = 0; $i < @lines; ++$i) {
 	next unless ($lines[$i] =~ m/^\s*#\s*(el)?if\s+0\s*$/);
@@ -175,9 +205,14 @@ sub remove_if0 {
 	--$i;
     }
 
-    $src = join("\n", @lines) . "\n";
-    return $src;
+    $self->{src} = join("\n", @lines) . "\n";
+    return $self;
 }
 
+sub strip_trailing {
+    my $self = shift;
+    $self->{src} =~ s/[ \t]*(?=\n)//g;
+    return $self;
+}
 
 1;

@@ -110,8 +110,8 @@ EOF
 
 for (my $i = 0; $i < @test_cases; ++$i) {
     my $t = $test_cases[$i];
-    my $out = pp_light($t->{in}, $t->{opt});
-    if ($out ne $t->{expect}) {
+    my $out = Pplight->string($t->{in}, $t->{opt});
+    if ("$out" ne $t->{expect}) {
 	printf "Test case %d failed:\n", $i;
 	printf "==== Expected ====\n";
 	print  $t->{expect};
