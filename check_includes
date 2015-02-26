@@ -32,6 +32,12 @@ my %linux_blacklist = map {$_ => 1}
 	  asm-generic/audit_signal.h
 	  asm-generic/audit_write.h
 	  crc32table.h
+	  locking-selftest-rlock-hardirq.h
+	  locking-selftest-rlock-softirq.h
+	  locking-selftest-spin-hardirq.h
+	  locking-selftest-spin-softirq.h
+	  locking-selftest-wlock-hardirq.h
+	  locking-selftest-wlock-softirq.h
      );
 
 my @ident_classes = get_ident_classes();
