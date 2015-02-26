@@ -191,12 +191,12 @@ sub do_source_file {
     my $filename = shift;
     $current_file = $filename;
 
-    my $src = pp_light_file($filename);
+    my $src = Pplight->file($filename);
     if (not defined $src) {
 	printf STDERR "reading %s failed: $!\n", $filename;
 	return;
     }
-    my $src2 = $src;
+    my $src2 = "$src";
     $src2 =~ s{^[ \t]*#[ \t]*include[ \t]+([<"])(.*)[>"].*\n}{}gm;
 
     # Now look for #includes, and for each try to parse the header.
@@ -297,7 +297,7 @@ sub get_quote_header {
 sub parse_header {
     my $path = shift;
     my $path_bn = basename($path);
-    my $src = pp_light_file($path);
+    my $src = Pplight->file($path);
 
     if (not defined $src) {
 	return { skip => "reading $path failed: $!" };
