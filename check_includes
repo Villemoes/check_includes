@@ -10,6 +10,7 @@ use lib dirname($0);
 
 use Pplight;
 
+my $abs_path = realpath('.');
 my @system_include_dirs;
 my @angle_include_dirs;
 my @quote_include_dirs;
@@ -304,6 +305,7 @@ sub get_quote_header {
     my $path = shift;
     my $curdir = dirname($current_file);
     $curdir = realpath($curdir);
+    $curdir =~ s/^$abs_path/./;
     return $quote_parsed_header{$curdir}{$path}
 	if (exists $quote_parsed_header{$curdir}{$path});
 
