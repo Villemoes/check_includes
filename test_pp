@@ -105,7 +105,25 @@ EOF
 #endif
 EOF
      },
-
+     { in => <<'EOF'
+#/* 1
+*/if defined(ABC)
+  # /* 2 */ define X Y
+#/*
+3
+*/else
+  # /*4*/define X Z
+/*5*/ #endif // 6
+EOF
+       ,
+     expect => << 'EOF'
+# if defined(ABC)
+  #   define X Y
+# else
+  #  define X Z
+  #endif
+EOF
+     },
     );
 
 for (my $i = 0; $i < @test_cases; ++$i) {
