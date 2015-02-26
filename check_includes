@@ -335,6 +335,7 @@ sub parse_header {
 		|| basename($file) eq $path_bn
 		|| ($is_wrapper && ends_with_any($file, \@angle_includes))
 		|| ($path_bn eq 'errno.h' && basename($file) eq 'errno-base.h')
+		|| ($path_bn eq 'types.h' && basename($file) eq 'int-ll64.h')
 		|| ($path_bn eq 'string.h' && basename($file) =~ m/string_(?:32|64)\.h/)
 	       ) {
 		push @{$h->{$class}}, $ident;
