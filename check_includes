@@ -21,6 +21,7 @@ my $trigraphs;
 my $cident_path;
 my @cident_opts;
 my $help;
+my $skip_msg_once = 1;
 
 # Some header files should be ignored for one reason or other; we add
 # them here.
@@ -185,7 +186,26 @@ my %quote_parsed_header; # key = dir of currentfile, value is hashref similar to
 
 do_source_file($_) for (@ARGV);
 
+if ($skip_msg_once) {
+    for my $h (sort keys %angle_parsed_header) {
+	printf STDERR "skipped <%s> (%d times): %s\n",
+	    $h, $angle_parsed_header{$h}{skipcount}, $angle_parsed_header{$h}{skip}
+		if $angle_parsed_header{$h}{skip};
+    }
 
+    for my $d (sort keys %quote_parsed_header) {
+	for my $h (sort keys %{$quote_parsed_header{$d}}) {
+	    printf STDERR "%s/: skipped \"%s\" (%d times): %s\n",
+		$d, $h, $quote_parsed_header{$d}{$h}{skipcount}, $quote_parsed_header{$d}{$h}{skip}
+		    if $quote_parsed_header{$d}{$h}{skip};
+	}
+    }
+}
+
+sub skip_header {
+    my $reason = shift;
+    return { skip => $reason, skipcount => 0 };
+}
 
 sub do_source_file {
     my $filename = shift;
@@ -207,8 +227,12 @@ sub do_source_file {
 	# Included .c files are usually auto-generated, and only used from very few files.
 	next unless $hpath =~ m/\.h$/;
 	my $h = ($angle_quote eq '<') ? get_angle_header($hpath) : get_quote_header($hpath);
-	if (exists $h->{skip}) {
-	    printf STDERR "%s: skipping %s: %s\n", $filename, $hpath, $h->{skip};
+	if ($h->{skip}) {
+	    if ($skip_msg_once) {
+		$h->{skipcount}++;
+	    } else {
+		printf STDERR "%s: skipping %s: %s\n", $filename, $hpath, $h->{skip};
+	    }
 	    next;
 	}
 	my $usecount = 0;
@@ -272,7 +296,7 @@ sub get_angle_header {
 	}
     }
 
-    $angle_parsed_header{$path} = { skip => "not found" };
+    $angle_parsed_header{$path} = skip_header("not found");
     return $angle_parsed_header{$path};
 }
 
@@ -290,7 +314,7 @@ sub get_quote_header {
 	}
     }
 
-    $quote_parsed_header{$curdir}{$path} = { skip => "not found" };
+    $quote_parsed_header{$curdir}{$path} = skip_header("not found");
     return $quote_parsed_header{$curdir}{$path};
 }
 
@@ -300,7 +324,7 @@ sub parse_header {
     my $src = Pplight->file($path);
 
     if (not defined $src) {
-	return { skip => "reading $path failed: $!" };
+	return skip_header("reading $path failed: $!");
     }
 
     # If this is a wrapper around one or more other headers, we tell
@@ -321,9 +345,9 @@ sub parse_header {
     $ENV{"CIDENT_all_files"} = ($is_wrapper || $includes_same_basename) ? 1 : 0;
     my @lines = qx($cident_path @cident_opts $path);
     if ($? == -1) {
-	return { skip => "invoking cident failed" };
+	return skip_header("invoking cident failed");
     } elsif ($?) {
-	return { skip => sprintf("cident exited with non-zero status %d", $? >> 8) };
+	return skip_header(sprintf("cident exited with non-zero status %d", $? >> 8));
     }
 
     my $h = { map { $_ => [] } @ident_classes };
