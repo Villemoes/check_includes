@@ -215,4 +215,43 @@ sub strip_trailing {
     return $self;
 }
 
+sub include_guard {
+    my $self = shift;
+    return $self->{include_guard} if exists $self->{include_guard};
+    my @lines = @{$self};
+    my $i = 0;
+    my $level = 1;
+    my $name;
+
+   # The first non-empty line must be an #ifndef or an #if !defined().
+    ++$i while ($i < @lines && $lines[$i] =~ m/^\s*$/);
+    goto not_found if ($i == @lines);
+    goto not_found
+	if (!($lines[$i] =~ m/^\s*#\s*ifndef\s+(?<name>[A-Za-z_][A-Za-z_0-9]*)\s*$/) &&
+	    !($lines[$i] =~ m/^\s*#\s*if\s+!\s*defined\s*\(\s*(?<name>[A-Za-z_][A-Za-z_0-9]*)\s*\)\s*$/));
+    $name = $+{name};
+
+    # The next non-empty line must be a #define of that macro.
+    1 while (++$i < @lines && $lines[$i] =~ m/^\s*$/);
+    goto not_found if ($i == @lines);
+    goto not_found if !($lines[$i] =~ m/^\s*#\s*define\s+\b$name\b/);
+
+    # Now track #ifs and #endifs. #elifs and #elses don't change the level.
+    while (++$i < @lines && $level > 0) {
+	if ($lines[$i] =~ m/^\s*#\s*(?:if|ifdef|ifndef)\b/) {
+	    $level++;
+	} elsif ($lines[$i] =~ m/^\s*#\s*endif\b/) {
+	    $level--;
+	}
+    }
+    goto not_found if ($level > 0); # issue a warning?
+    # Check that the rest of the file consists of empty lines.
+    ++$i while ($i < @lines && $lines[$i] =~ m/^\s*$/);
+    goto not_found if ($i < @lines);
+    return $self->{include_guard} = $name;
+
+ not_found:
+    return $self->{include_guard} = undef;
+}
+
 1;
