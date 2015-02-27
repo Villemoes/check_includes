@@ -275,7 +275,7 @@ sub do_source_file {
 	}
 
 	if ($usecount == 0) {
-	    printf "%s: apparently unnecessary include of %s\n", $filename, $hpath;
+	    printf "%s\t%s\t(redundant)\n", $filename, $hpath;
 	}
     }
 
