@@ -187,6 +187,7 @@ my $current_file;
 my %angle_parsed_header; # <foo/bar.h> => result of lookup+parse of foo/bar.h
 my %quote_parsed_header; # key = dir of currentfile, value is hashref similar to angle_parsed_header.
 
+fake_std_headers();
 
 do_source_file($_) for (@ARGV);
 
@@ -473,3 +474,10 @@ sub get_default_search_path {
 }
 
 sub any { $_ && return 1 for @_; 0 }
+
+sub fake_std_headers {
+    $angle_parsed_header{"stdarg.h"} =
+	{ typedef => [qw(va_list)], fun_macro => [qw(va_start va_arg va_end va_copy)]};
+    $angle_parsed_header{"stddef.h"} =
+	{ obj_macro => [qw(NULL)], fun_macro => [qw(offsetof)], typedef => [qw(ptrdiff_t size_t)]};
+}
