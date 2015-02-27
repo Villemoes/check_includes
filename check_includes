@@ -25,6 +25,7 @@ my $cident_redirect = '';
 my $help;
 my $skip_msg_once = 1;
 my $require_include_guard = 1;
+my $show_used = 0;
 
 # Some header files should be ignored for one reason or other; we add
 # them here.
@@ -139,7 +140,10 @@ sub parse_options {
 	    $cident_redirect = "2>> $file";
 	    next;
 	}
-
+	if ($arg =~ /^--show-used/) {
+	    $show_used = 1;
+	    next;
+	}
 
 	if ($arg =~ /^-/) {
 	    die "unknown option $arg";
@@ -236,6 +240,7 @@ sub do_source_file {
 	    next;
 	}
 	my $usecount = 0;
+	my %used;
 
 	# object-like macros, typedefs, extern vars, enum constants
 	# and extern functions just need to be present as words to be
@@ -245,6 +250,7 @@ sub do_source_file {
 	    for my $id (@{$h->{$class}}) {
 		if ($src2 =~ m/\b$id\b/) {
 		    ++$usecount;
+		    push @{$used{$class}}, $id;
 		}
 	    }
 	}
@@ -256,6 +262,7 @@ sub do_source_file {
 	    for my $id (@{$h->{$class}}) {
 		if ($src2 =~ m/\b$id\s*\(/) {
 		    ++$usecount;
+		    push @{$used{$class}}, $id;
 		}
 	    }
 	}
@@ -270,12 +277,19 @@ sub do_source_file {
 	    for my $id (@{$h->{"${kw}_def"}}) {
 		if ($src2 =~ m/\b$kw\s+$id\b/) {
 		    ++$usecount;
+		    push @{$used{"${kw}_def"}}, $id;
 		}
 	    }
 	}
 
 	if ($usecount == 0) {
 	    printf "%s\t%s\t(redundant)\n", $filename, $hpath;
+	} elsif ($show_used) {
+	    for my $class (@ident_classes) {
+		for my $id (@{$used{$class}}) {
+		    printf "%s\t%s\t%s (%s)\n", $filename, $hpath, $id, $class;
+		}
+	    }
 	}
     }
 
