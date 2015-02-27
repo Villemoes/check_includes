@@ -21,6 +21,7 @@ my $nostdinc;
 my $trigraphs;
 my $cident_path;
 my @cident_opts;
+my $cident_redirect = '';
 my $help;
 my $skip_msg_once = 1;
 my $require_include_guard = 1;
@@ -130,6 +131,15 @@ sub parse_options {
 	    $cident_path = $path;
 	    next;
 	}
+	if ($arg =~ /^--cident-stderr(?:=(.+))?/) {
+	    my $file = $1;
+	    if (not defined $file) {
+		$file = shift or die "missing argument to --cident-stderr";
+	    }
+	    $cident_redirect = "2>> $file";
+	    next;
+	}
+
 
 	if ($arg =~ /^-/) {
 	    die "unknown option $arg";
@@ -337,7 +347,7 @@ sub parse_header {
     my $includes_same_basename = any(map {basename($_) eq $path_bn} @angle_includes);
 
     $ENV{"CIDENT_all_files"} = ($is_wrapper || $includes_same_basename) ? 1 : 0;
-    my @lines = qx($cident_path @cident_opts $path);
+    my @lines = qx($cident_path @cident_opts $path $cident_redirect);
     if ($? == -1) {
 	return skip_header("invoking cident failed");
     } elsif ($?) {
