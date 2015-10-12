@@ -1,0 +1,83 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Slurp;
+use File::Basename;
+use lib dirname($0);
+
+use Pplight;
+
+my %cache;
+
+# Usage:
+#
+#   find . -name '.*.o.cmd' | sort | xargs /path/to/locstat
+#
+# or if you have GNU Parallel installed:
+#
+#   find . -name '.*.o.cmd' | sort | parallel -k -m /path/to/locstat
+#
+# Columns:
+#
+#  1: file
+#  2: number of headers included directly or indirectly
+#  3: size of file in bytes
+#  4: combined size of file and all included headers
+#  5: ratio #4/#3
+#  6: #LOC in file
+#  7: #LOC in file+all included headers
+#  8: ratio #7/#6
+#  9: As #6, but without comments and #if 0 blocks
+# 10: As #7, but without comments and #if 0 blocks
+# 11: ratio #10/#9
+
+sub get_counts {
+    my $file = shift;
+    my $src = read_file($file);
+    my $bytes = length($src);
+    my $raw_lines = (() = $src =~ m/\n/g);
+    my $pp_lines = @{Pplight->string($src)};
+    return ($bytes, $raw_lines, $pp_lines);
+}
+
+sub get_cached_counts {
+    my $file = shift;
+    if (exists $cache{$file}) {
+	return @{$cache{$file}};
+    }
+    $cache{$file} = [get_counts($file)];
+    return @{$cache{$file}};
+}
+
+for my $dep (@ARGV) {
+    if (!($dep =~ m@^((?:[^/]*/)*)\.(.*)\.o\.cmd$@)) {
+	warn "input $dep not a .o.cmd file";
+	next;
+    }
+    my $cfile = "$1$2.c";
+    if (!-e $cfile) {
+	next;
+    }
+    my ($c_bytes, $c_raw, $c_pp) = get_counts($cfile);
+    my ($bytes, $raw, $pp) = ($c_bytes, $c_raw, $c_pp);
+    my $hcount = 0;
+    open(my $fh, '<', $dep);
+    while (<$fh>) {
+	chomp;
+	next unless $_ =~ m@^\s*([a-zA-Z0-9_./-]+\.h) \\$@;
+	$hcount++;
+	my $h = $1;
+	my ($n0, $n1, $n2) = get_cached_counts($h);
+	$bytes += $n0;
+	$raw += $n1;
+	$pp += $n2;
+    }
+
+    printf "%s\t%d\t%d\t%d\t%f\t%d\t%d\t%f\t%d\t%d\t%f\n",
+	$cfile, $hcount,
+	$c_bytes, $bytes, $bytes/$c_bytes,
+	$c_raw, $raw, $raw/$c_raw,
+	$c_pp, $pp, $pp/$c_pp;
+}
