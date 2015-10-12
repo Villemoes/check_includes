@@ -1,0 +1,41 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Basename;
+use lib dirname($0);
+
+use Pplight;
+
+my @states = qw(normal if ifdef ifndef elif else);
+my %sh = map {$states[$_] => $_} (0..$#states);
+$sh{endif} = $sh{normal};
+
+for my $file (@ARGV) {
+    # Disable some of the preprocessing-light that wold normally be
+    # done. This way we only get truly empty blocks - if you also want
+    # to get those where there's e.g. a comment inside, tweak these
+    # (but then the line numbers are very likely useless).
+    my $src = Pplight->new($file, {if0 => 0, strip_comments => 0, bsnl => 0});
+    next if not defined $src;
+    my @lines = @{$src};
+    my $s = $sh{normal};
+    my $start;
+    for (my $i = 0; $i < @lines; ++$i) {
+	$_ = $lines[$i];
+	next if m/^\s*$/;
+	if ($s && $_ =~ m/^\s*#\s*(elif|else|endif)\b/) {
+	    printf "%s:%d: empty %s block\n", $file, $start, $states[$s];
+	    $s = $sh{$1};
+	    $start = $i+1;
+	    next;
+	}
+	if (!($_ =~ m/^\s*#\s*(if|ifdef|ifndef|elif|else)\b/)) {
+	    $s = 0;
+	    next;
+	}
+	$s = $sh{$1};
+	$start = $i+1;
+    }
+}
