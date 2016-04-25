@@ -50,8 +50,7 @@ depssuffix := deps
 
 all: cident
 
-cident: CFLAGS += -I$(HOME)/include
-cident: LDFLAGS += -L$(HOME)/lib -lsparse
+cident: LDFLAGS += -lsparse
 cident: CWARN += $(call cc-option,-Wno-override-init,)
 cident: CWARN += $(call cc-option,-Wno-initializer-overrides,)
 
