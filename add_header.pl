@@ -1,7 +1,5 @@
 #!/usr/bin/perl
 #
-# File: add_header.pl
-# Time-stamp: <2015-09-07 23:15:49 villemoes>
 # Author: Rasmus Villemoes
 
 use strict;
