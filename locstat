@@ -58,6 +58,9 @@ for my $dep (@ARGV) {
     }
     my $cfile = "$1$2.c";
     if (!-e $cfile) {
+	### Maybe this instead of unconditional next:
+	# $cfile = "$1$2.S";
+	# next if (!-e $cfile);
 	next;
     }
     my ($c_bytes, $c_raw, $c_pp) = get_counts($cfile);
