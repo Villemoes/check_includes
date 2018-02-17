@@ -1,0 +1,88 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Basename;
+use File::Copy;
+use File::Temp qw/ tempdir /;
+use File::Slurp;
+
+my $tmpd = tempdir("header_check_XXXXXX", TMPDIR => 1, CLEANUP => 1);
+#print "$tmpd\n";
+
+my %candidates;
+my $candidate_file = shift
+    or die "use: $0 candidate_file <file1.c> <file2.c> ...";
+
+open(my $fh, '<', $candidate_file)
+    or die "unable to open $candidate_file";
+while (<$fh>) {
+    chomp;
+    my ($cfile, $hfile) = split;
+    push @{$candidates{$cfile}}, $hfile;
+}
+
+
+for (sort @ARGV) {
+    do_file($_);
+}
+
+sub do_file {
+    my $cfile = shift;
+    my $ofile = $cfile;
+    $ofile =~ s/\.c/.o/;
+    my $cmdfile = dirname($ofile) . '/.' . basename($ofile) . '.cmd';
+    my $bofile = basename($ofile);
+    my $bcmdfile = basename($cmdfile);
+    my $origsrc = read_file($cfile);
+
+    make($ofile);
+    if ($? != 0) {
+	printf STDERR "initial make of ${ofile} failed\n";
+	return;
+    }
+    copy($ofile, $tmpd);
+    my $dep_len = wc_l($cmdfile);
+
+    for my $h (@{$candidates{$cfile}}) {
+	my $src = $origsrc;
+	if (not $src =~ s@^(\s*#\s*include\s+[<"]${h}[">])@// $1@gm) {
+	    printf STDERR "%s apparently not included from %s ??\n", $h, $cfile;
+	    next;
+	}
+	write_file($cfile, $src);
+	make($ofile);
+	if ($?) {
+	    printf "%s\t%s\tfalse positive\n", $cfile, $h;
+	    next;
+	}
+	my $cmp_obj = compare_object_files("${tmpd}/$bofile", $ofile);
+	my $cmp_dep = $dep_len - wc_l($cmdfile);
+	printf "%s\t%s\t%s\t%d\n", $cfile, $h, $cmp_obj, $cmp_dep;
+    }
+
+    write_file($cfile, $origsrc);
+}
+
+
+sub make {
+    my $tgt = shift;
+    unlink($tgt);
+    system("make ${tgt} > /dev/null 2> /dev/null");
+}
+
+sub compare_object_files {
+    my $o1 = shift;
+    my $o2 = shift;
+    system("cmp -s -- $o1 $o2");
+    return 'byte-identical' if ($? == 0);
+    system("/bin/bash -c 'cmp -s <(objdump -d $o1 | grep -v \"file format\") <(objdump -d $o2 | grep -v \"file format\") '");
+    return 'objdump-identical' if ($? == 0);
+    return 'different object-code';
+}
+
+sub wc_l {
+    my $f = shift;
+    return scalar (() = read_file($f));
+}
