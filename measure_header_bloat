@@ -1,0 +1,362 @@
+#!/usr/bin/perl
+
+# This is an attempt at writing a wrapper for running locstat on a
+# given set of kernel revisions and "running the numbers" on that,
+# i.e. produce a set of statistics.
+
+use strict;
+use warnings;
+
+use BSD::Resource;
+use Time::HiRes;
+use File::Basename;
+use YAML::XS qw(LoadFile);
+use IPC::Run3;
+use Cwd;
+use Statistics::Descriptive;
+
+use lib dirname($0);
+
+use Pplight;
+
+use Getopt::Long;
+
+my $params;
+my $workdir = getcwd();
+my %data;
+
+my $param_file = "params.yaml";
+my $output_dir = ".";
+my $locstat_path = "$workdir/locstat";
+
+GetOptions("param=s" => \$param_file,
+	   "output-dir=s" => \$output_dir,
+	   "locstat=s" => \$locstat_path)
+    or die;
+
+read_params($param_file);
+
+
+# params: (global var)
+#
+# Global settings:
+#
+# target: vmlinux (or lib/, or kernel/, or whatever)
+# parallel: 4
+# repeat: 1 # for timing
+#
+# Defaults for "simple" revisions:
+#
+# kerneldir: ...
+# kconfig: ...
+#   ...
+# revisions:
+# - v3.4
+# - v3.5
+# - v3.6
+# ...
+# - v4.0
+#
+# The revisions element must be an array. Each element should be a
+# hash with keys "name", "rev", "kconfig", "kerneldir". 
+#
+# - "rev" is required and should be something which we can "git
+#   checkout".
+#
+# - "name" will be used as a pretty version of rev, and can be omitted
+#   in which case rev is used.
+#
+# - "out" is used as the output basename (with .yaml appended). This
+#   also defaults to rev.
+#
+# - "kerneldir" is the path to the repository to use.
+#
+# - "kconfig" is a string which either names a "make *config",
+#   e.g. "defconfig", or a path (relative to $cwd) to a file (this is
+#   distinguished by whether the string contains a slash, so you may
+#   want to say ./file). In the former case, we copy the file to
+#   .config in the kerneldir, and in the latter, we simply run "make
+#   $kconfig". In either case, this is followed by "make
+#   silentoldconfig".
+#
+# If either kconfig or kerneldir are omitted, the global defaults are
+# used. As a convenience, an element of the revision array can also be
+# a simple string, which is then equivalent to the hash { rev: $str }.
+# 
+
+my @locstat_columns =
+    (
+     'name', 'hcount',          # name of .c, #included headers
+     'csize', 'tsize', 'rsize', # size of .c, total size, ratio
+     'cloc', 'tloc', 'rloc',    # #lines in .c, #total lines, ratio
+     'crloc', 'trloc', 'rrloc'  # "reduced LOC", #lines sans comments and #if 0 blocks
+    );
+
+my @stat_cols = @locstat_columns[1..$#locstat_columns];
+my @stats =
+    (
+     ['mean',   sub {$_[0]->mean()}],
+     ['min',    sub {$_[0]->min()}],
+     ['q25',    sub {$_[0]->quantile(1)}],
+     ['median', sub {$_[0]->quantile(2)}],
+     ['q75',    sub {$_[0]->quantile(3)}],
+     ['max',    sub {$_[0]->max()}],
+    );
+my @extra_cols = ('wtime', 'utime', 'stime', 'ntu');
+
+my @out_cols = ('name');
+push @out_cols. @extra_cols;
+for my $c (@stat_cols) {
+    for my $s (@stats) {
+	push @out_cols, "${c}_" . $s->[0];
+    }
+}
+
+
+print join("\t", @out_cols, "\n";
+
+for (@{$params->{revisions}}) {
+    my $rev = prepare_revision($_);
+    next unless $rev;
+    do_revision($rev);
+
+    chdir $workdir or
+	die "failed to chdir back to $workdir";
+    next unless exists $rev->{data};
+    if ($output_dir) {
+	my $output_file = "${output_dir}/" . $rev->{out} . ".yaml";
+	open(my $fh, '>', $output_file)
+	    or die "unable to open $output_file: $!";
+	print $fh YAML::XS::Dump($rev);
+	close($fh);
+    }
+
+    for my $d (@stat_cols) {
+	my $data = Statistics::Descriptive::Full->new();
+	$data->add_data(@[$rev->{data}{$d}]);
+	$data->sort_data();
+	for my $s (@stats) {
+	    my $val = $s->[1]->($data);
+	    $rev->{"${d}_" . $s->[0]} = $val;
+	}
+    }
+
+    print join("\t", map {$rev->{$_}} @out_cols), "\n";
+}
+
+sub read_params {
+    my $file = shift;
+    $params = LoadFile($file);
+    $params->{kerneldir} //= ".";
+    $params->{kconfig} //= "defconfig";
+    $params->{target} //= "vmlinux";
+    $params->{revisions} //= [ qw(v4.4) ];
+    $params->{repeat} ||= 1;
+    $params->{parallel} ||= 4;
+	
+    # $params->{ARCH} //= ??;
+    # $params->{CROSS_COMPILE} //= ??;
+}
+
+sub get_times {
+    my $href = shift;
+    my $ru;
+    $ru = getrusage(RUSAGE_CHILDREN);
+    $href->{utime} = $ru->utime;
+    $href->{stime} = $ru->stime;
+    $href->{wtime} = Time::HiRes::time();
+}
+
+# run_command: wrapper for run3
+#
+# Returns a hashref wrapping up the stdout, stderr, and various
+# metadata.
+sub run_command {
+    my $args = shift;
+    my ($stdout, $stderr);
+    my (%start, %stop);
+
+    printf STDERR "Doing [%s]\n", ref $args eq "ARRAY" ? join(" ", @$args) : $args;
+    
+    $! = 0;
+    get_times(\%start);
+    my $ret = run3($args, \undef, \$stdout, \$stderr, {return_if_system_error => 1});
+    my $exitval = $?;
+    my $errno = $!;
+    get_times(\%stop);
+    die unless $ret;
+    return {
+	    cmd => ref $args eq "ARRAY" ? join(" ", @$args) : $args,
+	    exitval => $exitval,
+	    errno => $errno,
+	    stdout => $stdout,
+	    stderr => $stderr,
+	    wtime => $stop{wtime}-$start{wtime}, # wallclock time
+	    utime => $stop{utime}-$start{utime}, # user time
+	    stime => $stop{stime}-$start{stime}, # system time
+	   };
+}
+
+# If the command succeeded, do nothing, just return 0.
+#
+# If the command failed to execute, print $! to STDERR and return -1.
+#
+# If the command did execute, but exited with something other than 1,
+# print its stderr to STDERR and return -1.
+sub simple_handle_ret {
+    my $ret = shift;
+    return 0 if ($ret->{exitval} == 0);
+    if ($ret->{exitval} == -1) {
+	printf STDERR "Command '%s' failed: %s\n", $ret->{cmd}, $ret->{errno};
+	return -1;
+    }
+    if ($ret->{exitval} & 127) {
+	printf STDERR "Command '%s' killed by signal %d\n", $ret->{cmd}, $ret->{exitval} & 127;
+	return -1;
+    }
+    printf STDERR "Command '%s' exited with status %d; stderr:\n", $ret->{cmd}, $ret->{exitval} >> 8;
+    printf STDERR "  %s", $_ for (split /^/, $ret->{stderr});
+    return -1;
+}
+
+sub do_configure {
+    my $kconfig = shift;
+    my $ret;
+    
+    if ($kconfig =~ m#^/#) {
+	$ret = run_command("cp '$kconfig' .config");
+    } elsif ($kconfig =~ m#/#) {
+	$ret = run_command("cp '$workdir/$kconfig' .config");
+    } else {
+	$ret = run_command("make $kconfig");
+    }
+    $ret = simple_handle_ret($ret);
+    return $ret if $ret;
+
+    $ret = run_command("make silentoldconfig");
+    return simple_handle_ret($ret);
+}
+
+sub do_clean {
+    my $ret = run_command("make clean");
+    return simple_handle_ret($ret);
+}
+
+sub do_distclean {
+    my $ret = run_command("make distclean");
+    return simple_handle_ret($ret);
+}
+
+sub do_checkout {
+    my $rev = shift;
+    $rev = $rev->{rev};
+    my $ret = run_command("git checkout $rev");
+    return simple_handle_ret($ret);
+}
+
+sub do_fill_page_cache {
+    my $ret = run_command("git grep -q foobar > /dev/null 2> /dev/null");
+    return 0;
+}
+
+# We want to extract a little more information from do_compile and
+# do_locstat then just success/fail, so they return the full ret
+# object.
+sub do_compile {
+    my $rev = shift;
+    my $cmd = sprintf("make -j%d %s", $rev->{parallel}, $rev->{target});
+    my $ret = run_command($cmd);
+    return $ret;
+}
+
+sub do_locstat {
+    # XXX: Use xargs if GNU parallel is not installed?
+    my $cmd = "find . -name '*.o.cmd' | sort | parallel -k -m ${locstat_path}";
+    return run_command($cmd);
+}
+
+sub prepare_revision {
+    my $rev = shift;
+
+    if (ref($rev) eq '') {
+	$rev = { rev => $rev};
+    }
+    if (ref($rev) ne 'HASH') {
+	warn "Configuration error; revision is not a hash nor a string";
+	return undef;
+    }
+    if (not exists $rev->{rev}) {
+	warn "Configuration error; revision with no rev member";
+	return undef;
+    }
+    $rev->{name} //= $rev->{rev};
+    $rev->{out} //= $rev->{rev};
+    $rev->{kerneldir} //= $params->{kerneldir};
+    $rev->{kconfig} //= $params->{kconfig};
+    $rev->{target} //= $params->{target};
+    $rev->{parallel} //= $params->{parallel};
+    $rev->{repeat} //= $params->{repeat};
+    
+    if (!$rev->{kerneldir}) {
+	warn "Revision $rev->{rev} has no kerneldir";
+	return undef;
+    }
+    return $rev;
+}
+
+sub do_revision {
+    # At any sign of trouble, just give up.
+    my $rev = shift;
+    my $ret;
+    my $d;
+    
+    # Everything from now on is done inside the kerneldir. Our caller
+    # will chdir back the original work dir, to simplify error paths.
+    if (!chdir($rev->{kerneldir})) {
+	warn "Cannot chdir to $rev->{kerneldir}: $!";
+	return;
+    }
+
+    # We do a distclean before checking out the new revision, since
+    # the various Makefile clean rules may be different.
+    if (do_distclean() || do_checkout($rev)) {
+	return;
+    }
+
+    if (do_configure($rev->{kconfig})) {
+	return;
+    }
+
+    do_fill_page_cache();
+    my ($wtime, $utime, $stime) = (0,0,0);
+    for (my $i = 0; $i < $rev->{repeat}; ++$i) {
+	return if do_clean();
+	$ret = do_compile($rev);
+	return if (simple_handle_ret($ret));
+	
+	$wtime += $ret->{wtime};
+	$utime += $ret->{utime};
+	$stime += $ret->{stime};
+    }
+    $wtime /= $rev->{repeat};
+    $utime /= $rev->{repeat};
+    $stime /= $rev->{repeat};
+
+    $ret = do_locstat();
+    return if (simple_handle_ret($ret));
+
+    $d = {};
+    
+    for my $line (split /\n/, $ret->{stdout}) {
+	my %vals;
+	@vals{@locstat_columns} = split /\t/, $line;
+	push @{$d->{$_}}, $vals{$_} for @locstat_columns;
+	$d->{ntu}++;
+    }
+
+    $d->{wtime} = $wtime;
+    $d->{utime} = $utime;
+    $d->{stime} = $stime;
+
+    $rev->{data} = $d;
+}
