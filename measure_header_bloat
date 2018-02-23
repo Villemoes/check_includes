@@ -28,9 +28,10 @@ my %data;
 my $param_file = "params.yaml";
 my $output_dir = ".";
 my $locstat_path = "$workdir/locstat";
+my $make = "make";
 
-GetOptions("param=s" => \$param_file,
-	   "output-dir=s" => \$output_dir,
+GetOptions("p|param=s" => \$param_file,
+	   "o|output-dir=s" => \$output_dir,
 	   "locstat=s" => \$locstat_path)
     or die;
 
@@ -105,7 +106,7 @@ my @stats =
 my @extra_cols = ('wtime', 'utime', 'stime', 'ntu');
 
 my @out_cols = ('name');
-push @out_cols. @extra_cols;
+push @out_cols, @extra_cols;
 for my $c (@stat_cols) {
     for my $s (@stats) {
 	push @out_cols, "${c}_" . $s->[0];
@@ -113,35 +114,35 @@ for my $c (@stat_cols) {
 }
 
 
-print join("\t", @out_cols, "\n";
+print join("\t", @out_cols), "\n";
 
 for (@{$params->{revisions}}) {
     my $rev = prepare_revision($_);
     next unless $rev;
-    do_revision($rev);
+    my $data = do_revision($rev);
 
     chdir $workdir or
 	die "failed to chdir back to $workdir";
-    next unless exists $rev->{data};
+    next unless ref($data) eq 'HASH';
     if ($output_dir) {
-	my $output_file = "${output_dir}/" . $rev->{out} . ".yaml";
+	my $output_file = "${output_dir}/locstat_" . $rev->{out} . ".txt";
 	open(my $fh, '>', $output_file)
 	    or die "unable to open $output_file: $!";
-	print $fh YAML::XS::Dump($rev);
+	print $fh $data->{locstat};
 	close($fh);
     }
 
     for my $d (@stat_cols) {
-	my $data = Statistics::Descriptive::Full->new();
-	$data->add_data(@[$rev->{data}{$d}]);
-	$data->sort_data();
+	my $vals = Statistics::Descriptive::Full->new();
+	$vals->add_data(@{$data->{$d}});
+	$vals->sort_data();
 	for my $s (@stats) {
-	    my $val = $s->[1]->($data);
-	    $rev->{"${d}_" . $s->[0]} = $val;
+	    my $val = $s->[1]->($vals);
+	    $data->{"${d}_" . $s->[0]} = $val;
 	}
     }
 
-    print join("\t", map {$rev->{$_}} @out_cols), "\n";
+    print join("\t", map {$data->{$_}} @out_cols), "\n";
 }
 
 sub read_params {
@@ -153,9 +154,12 @@ sub read_params {
     $params->{revisions} //= [ qw(v4.4) ];
     $params->{repeat} ||= 1;
     $params->{parallel} ||= 4;
-	
-    # $params->{ARCH} //= ??;
-    # $params->{CROSS_COMPILE} //= ??;
+
+    for my $w (qw(ARCH CROSS_COMPILE CC)) {
+	if (defined $params->{$w}) {
+	    $make .= " $w=$params->{$w}";
+	}
+    }
 }
 
 sub get_times {
@@ -228,22 +232,22 @@ sub do_configure {
     } elsif ($kconfig =~ m#/#) {
 	$ret = run_command("cp '$workdir/$kconfig' .config");
     } else {
-	$ret = run_command("make $kconfig");
+	$ret = run_command("$make $kconfig");
     }
     $ret = simple_handle_ret($ret);
     return $ret if $ret;
 
-    $ret = run_command("make silentoldconfig");
+    $ret = run_command("$make silentoldconfig");
     return simple_handle_ret($ret);
 }
 
 sub do_clean {
-    my $ret = run_command("make clean");
+    my $ret = run_command("$make clean");
     return simple_handle_ret($ret);
 }
 
 sub do_distclean {
-    my $ret = run_command("make distclean");
+    my $ret = run_command("$make distclean");
     return simple_handle_ret($ret);
 }
 
@@ -264,14 +268,18 @@ sub do_fill_page_cache {
 # object.
 sub do_compile {
     my $rev = shift;
-    my $cmd = sprintf("make -j%d %s", $rev->{parallel}, $rev->{target});
+    my $cmd = sprintf("$make -j%d %s", $rev->{parallel}, $rev->{target});
     my $ret = run_command($cmd);
     return $ret;
 }
 
 sub do_locstat {
     # XXX: Use xargs if GNU parallel is not installed?
-    my $cmd = "find . -name '*.o.cmd' | sort | parallel -k -m ${locstat_path}";
+    my $cmd = "find . -name '*.o.cmd'" .
+	" | grep -v '^./scripts/'" .
+	" | grep -v '^./tools/'" .
+	" | sort" .
+	" | parallel -k -m ${locstat_path}";
     return run_command($cmd);
 }
 
@@ -314,25 +322,25 @@ sub do_revision {
     # will chdir back the original work dir, to simplify error paths.
     if (!chdir($rev->{kerneldir})) {
 	warn "Cannot chdir to $rev->{kerneldir}: $!";
-	return;
+	return undef;
     }
 
     # We do a distclean before checking out the new revision, since
     # the various Makefile clean rules may be different.
     if (do_distclean() || do_checkout($rev)) {
-	return;
+	return undef;
     }
 
     if (do_configure($rev->{kconfig})) {
-	return;
+	return undef;
     }
 
     do_fill_page_cache();
     my ($wtime, $utime, $stime) = (0,0,0);
     for (my $i = 0; $i < $rev->{repeat}; ++$i) {
-	return if do_clean();
+	return undef if do_clean();
 	$ret = do_compile($rev);
-	return if (simple_handle_ret($ret));
+	return undef if (simple_handle_ret($ret));
 	
 	$wtime += $ret->{wtime};
 	$utime += $ret->{utime};
@@ -343,10 +351,11 @@ sub do_revision {
     $stime /= $rev->{repeat};
 
     $ret = do_locstat();
-    return if (simple_handle_ret($ret));
+    return undef if (simple_handle_ret($ret));
 
     $d = {};
-    
+
+    $d->{locstat} = $ret->{stdout};
     for my $line (split /\n/, $ret->{stdout}) {
 	my %vals;
 	@vals{@locstat_columns} = split /\t/, $line;
@@ -354,9 +363,10 @@ sub do_revision {
 	$d->{ntu}++;
     }
 
+    $d->{name} = $rev->{name};
     $d->{wtime} = $wtime;
     $d->{utime} = $utime;
     $d->{stime} = $stime;
 
-    $rev->{data} = $d;
+    return $d;
 }
